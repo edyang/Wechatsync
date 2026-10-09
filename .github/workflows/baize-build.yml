@@ -100,10 +100,56 @@ jobs:
           sudo bash out/wechatsync-mcp-linux/uninstall.sh --purge
           sudo test ! -f /etc/wechatsync-mcp/.env
           trap - EXIT
+      - name: Build Baize MCP Docker image
+        run: |
+          set -euo pipefail
+          docker build --progress=plain -f deploy/docker/Dockerfile -t baize-wechatsync-mcp:baize-dev .
+          docker image inspect baize-wechatsync-mcp:baize-dev --format '{{.Id}} {{.Architecture}}'
+      - name: Package offline Docker Compose bundle
+        run: |
+          set -euo pipefail
+          bundle=out/wechatsync-mcp-docker
+          mkdir -p "$bundle"
+          cp deploy/docker/compose.yaml "$bundle/compose.yaml"
+          cp deploy/docker/.env.example "$bundle/.env.example"
+          cp deploy/docker/README.md "$bundle/README.md"
+          cp deploy/docker/smoke.mjs "$bundle/smoke.mjs"
+          for f in install.sh manage.sh uninstall.sh; do
+            install -m 0755 "deploy/docker/$f" "$bundle/$f"
+            bash -n "$bundle/$f"
+          done
+          docker save baize-wechatsync-mcp:baize-dev | gzip -1 > "$bundle/image.tar.gz"
+          test -s "$bundle/image.tar.gz"
+          (cd out && zip -qr Wechatsync-Baize-MCP-Docker.zip wechatsync-mcp-docker)
+          unzip -tq out/Wechatsync-Baize-MCP-Docker.zip
+          unzip -Z1 out/Wechatsync-Baize-MCP-Docker.zip | grep -Fxq 'wechatsync-mcp-docker/compose.yaml'
+          unzip -Z1 out/Wechatsync-Baize-MCP-Docker.zip | grep -Fxq 'wechatsync-mcp-docker/image.tar.gz'
+      - name: Test Docker host Chrome WebSocket and Manager MCP network
+        run: |
+          set -euo pipefail
+          cd out/wechatsync-mcp-docker
+          cleanup() { bash uninstall.sh --purge || true; }
+          trap cleanup EXIT
+          bash install.sh
+          node smoke.mjs
+          docker run --rm --network baize-publishing --entrypoint node baize-wechatsync-mcp:baize-dev \
+            -e 'fetch("http://wechatsync-mcp:9528/health").then(async r=>{const data=await r.json();if(!r.ok||data.status!=="ok")process.exit(1)}).catch(e=>{console.error(e);process.exit(1)})'
+          original_hash="$(sha256sum .env | awk '{print $1}')"
+          bash install.sh
+          test "$original_hash" = "$(sha256sum .env | awk '{print $1}')"
+          bash manage.sh restart
+          bash manage.sh status
+          bash manage.sh logs --tail=15
+          bash uninstall.sh
+          test -f .env
+          test -z "$(docker ps -q --filter name='^/baize-wechatsync-mcp$')"
+          bash uninstall.sh --purge
+          test ! -e .env
+          trap - EXIT
       - name: Checksums
         run: |
           cd out
-          sha256sum Wechatsync-Baize-Chrome-v2.zip Wechatsync-Baize-MCP-Server.zip Wechatsync-Baize-MCP-Linux.zip > SHA256SUMS.txt
+          sha256sum Wechatsync-Baize-Chrome-v2.zip Wechatsync-Baize-MCP-Server.zip Wechatsync-Baize-MCP-Linux.zip Wechatsync-Baize-MCP-Docker.zip > SHA256SUMS.txt
       - name: Upload Chrome ZIP
         uses: actions/upload-artifact@v4
         with:
@@ -121,6 +167,12 @@ jobs:
         with:
           name: Wechatsync-Baize-MCP-Linux
           path: out/Wechatsync-Baize-MCP-Linux.zip
+          if-no-files-found: error
+      - name: Upload offline Docker Compose ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wechatsync-Baize-MCP-Docker
+          path: out/Wechatsync-Baize-MCP-Docker.zip
           if-no-files-found: error
       - name: Upload checksum manifest
         uses: actions/upload-artifact@v4
