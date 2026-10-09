@@ -64,3 +64,31 @@ MCP 输入 `cover` 优先；未提供时，从 Markdown 第一张有效图片提
 CI 只证明编译和本地测试通过，**不能替代真实账号验收**。未经平台帐号所有者授权不要启用直接发布。浏览器登录态复用与非官方接口可能受平台页面更改、审核及风控限制。
 
 发布结果可能是：`draft`、`submitted`、`reviewing`、`published`、`unknown`。只有返回 `status=published` 且 `verification.verified=true` 的公开文章才应在 Manager 中标为已发布。请求超时或失败，不应盲目重试。
+
+
+## 7. Linux systemd 一键安装（推荐）
+
+新版 GitHub Actions 产物增加 **Wechatsync-Baize-MCP-Linux** 安装包，包含 systemd 服务安装/升级、服务管理、日志、卸载脚本以及环境变量示例。需要单独安装白泽版 Chrome 扩展。Linux 需有 systemd 和系统级 Node.js 22+，包内已带生产依赖，无需在目标主机安装 npm 包。
+
+下载 Actions artifact 并依次解压外层与内层 ZIP，进入包含 install.sh 的目录：
+
+~~~bash
+sudo bash install.sh
+sudo /opt/wechatsync-mcp/bin/status.sh
+sudo /opt/wechatsync-mcp/bin/logs.sh --follow
+sudo /opt/wechatsync-mcp/bin/manage.sh restart
+sudoedit /etc/wechatsync-mcp/.env
+sudo systemctl restart wechatsync-mcp
+~~~
+
+安装过程自动生成 **两组不同的随机密钥**，分别供 Chrome WebSocket 和 Manager MCP SSE Bearer 使用，绝不将 Token 输出到安装日志。真正运行的配置是 /etc/wechatsync-mcp/.env（root 拥有，0600）；再次执行安装脚本会保留旧配置。systemd 服务使用独立的低权限运行账户，开机自启，日志可用 journalctl 查看。
+
+默认安全策略：WebSocket 9527、MCP SSE 9528 均仅监听 127.0.0.1，内部桥接 9529 永远只允许本地。若 Chrome 在另一台电脑，通过 SSH 端口转发连接本地 9527；如果 Manager 部署在不同容器或主机，应通过私网、VPN 或受控 HTTPS 反向代理连接 SSE，禁止直接将端口裸露公网。
+
+卸载保留配置：
+
+~~~bash
+sudo /opt/wechatsync-mcp/bin/uninstall.sh
+~~~
+
+彻底删除密钥及配置：从仍保留的解压目录执行 sudo bash uninstall.sh --purge。更多步骤与注意事项参见 [Linux 部署包完整说明](../deploy/linux/README.md)。
