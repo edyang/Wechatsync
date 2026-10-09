@@ -24,7 +24,7 @@ export interface SyncResult {
   postId?: string
   postUrl?: string
   status?: string
-  verification?: { verified: boolean; status: string; [key: string]: unknown }
+  verification?: { verified: boolean; status: string }
   draftOnly?: boolean
   message?: string
   error?: string
