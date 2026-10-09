@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { firstContentImage } from './first-image'
+import { firstContentImage } from '../src/mcp/first-image'
 
 describe('Baize cover fallback', () => {
   it('chooses the first actual markdown image, ignoring fenced examples', () => {
