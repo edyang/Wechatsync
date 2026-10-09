@@ -359,7 +359,9 @@ async function startSSEMode() {
       return
     }
     try {
-      await session.transport.handlePostMessage(req, res)
+      // express.json() has already consumed the request stream. Pass req.body
+      // explicitly or the SDK tries to parse an empty stream and replies HTTP 400.
+      await session.transport.handlePostMessage(req, res, req.body)
     } catch (error) {
       console.error('[MCP] Message failed:', error)
       if (!res.headersSent) res.status(500).json({ error: 'MCP transport failure' })
