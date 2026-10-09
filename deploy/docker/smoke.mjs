@@ -59,7 +59,7 @@ newestWs.addEventListener('message', (event) => {
   const message = JSON.parse(event.data)
   assert.equal(message.token, env.WECHATSYNC_TOKEN)
   if (message.method === 'listPlatforms') {
-    ws.send(JSON.stringify({
+    newestWs.send(JSON.stringify({
       id: message.id,
       result: [{ id: 'zhihu', name: '知乎', isAuthenticated: true }],
     }))
