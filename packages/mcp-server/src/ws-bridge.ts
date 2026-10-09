@@ -30,9 +30,11 @@ export class ExtensionBridge {
 
   // 是否静默模式（CLI 使用时不输出日志）
   private silent: boolean = false
+  private apiPort: number
 
-  constructor(private port: number = 9527, options?: { silent?: boolean }) {
+  constructor(private port: number = 9527, options?: { silent?: boolean; apiPort?: number }) {
     this.silent = options?.silent ?? false
+    this.apiPort = options?.apiPort ?? port + 1
     if (!this.silent) {
       if (this.token) {
         console.error('[Bridge] Token authentication enabled')
@@ -49,11 +51,11 @@ export class ExtensionBridge {
     try {
       await this.startServer()
       this.isServerMode = true
-      if (!this.silent) console.error(`[Bridge] Running as PRIMARY (WebSocket: ${this.port}, HTTP: ${this.port + 1})`)
+      if (!this.silent) console.error(`[Bridge] Running as PRIMARY (WebSocket: ${this.port}, HTTP: ${this.apiPort})`)
     } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException).code === 'EADDRINUSE') {
         this.isServerMode = false
-        if (!this.silent) console.error(`[Bridge] Running as SECONDARY (forwarding to localhost:${this.port + 1})`)
+        if (!this.silent) console.error(`[Bridge] Running as SECONDARY (forwarding to localhost:${this.apiPort})`)
       } else {
         throw error
       }
@@ -156,8 +158,8 @@ export class ExtensionBridge {
         res.end('Not found')
       })
 
-      const httpPort = this.port + 1
-      this.httpServer.listen(httpPort, () => {
+      const httpPort = this.apiPort
+      this.httpServer.listen(httpPort, '127.0.0.1', () => {
         if (!this.silent) console.error(`[Bridge] HTTP API listening on port ${httpPort}`)
         resolve()
       })
@@ -299,8 +301,8 @@ export class ExtensionBridge {
   private async checkPrimaryHealth(): Promise<{ connected: boolean; error?: string }> {
     return new Promise((resolve) => {
       const options = {
-        hostname: 'localhost',
-        port: this.port + 1,
+        hostname: '127.0.0.1',
+        port: this.apiPort,
         path: '/status',
         method: 'GET',
         timeout: 3000,
@@ -405,7 +407,7 @@ export class ExtensionBridge {
       try {
         await this.startServer()
         this.isServerMode = true
-        if (!this.silent) console.error(`[Bridge] Promoted to PRIMARY (WebSocket: ${this.port}, HTTP: ${this.port + 1})`)
+        if (!this.silent) console.error(`[Bridge] Promoted to PRIMARY (WebSocket: ${this.port}, HTTP: ${this.apiPort})`)
         return true
       } catch {
         await new Promise(r => setTimeout(r, 1000))
@@ -450,7 +452,7 @@ export class ExtensionBridge {
       const data = JSON.stringify({ method, params })
       const options = {
         hostname: 'localhost',
-        port: this.port + 1,
+        port: this.apiPort,
         path: '/request',
         method: 'POST',
         headers: {

@@ -16,6 +16,7 @@ import {
 import express, { type Request, type Response } from 'express'
 import fs from 'fs'
 import path from 'path'
+import { timingSafeEqual } from 'node:crypto'
 import { ExtensionBridge } from './ws-bridge.js'
 import type { PlatformInfo, SyncResult } from './types.js'
 
@@ -26,7 +27,27 @@ const HTTP_PORT = parseInt(process.env.SYNC_HTTP_PORT || '9528', 10)
 const isSSEMode = process.argv.includes('--sse')
 
 // Extension WebSocket 桥接
-const bridge = new ExtensionBridge(WS_PORT)
+// The bridge's internal HTTP API must not collide with the public MCP SSE port.
+const BRIDGE_API_PORT = parseInt(process.env.SYNC_BRIDGE_API_PORT || String(HTTP_PORT + 1), 10)
+const bridge = new ExtensionBridge(WS_PORT, {
+  apiPort: isSSEMode ? BRIDGE_API_PORT : WS_PORT + 1,
+})
+
+const HTTP_ACCESS_TOKEN = process.env.WECHATSYNC_HTTP_TOKEN || ''
+function authorizeHttp(req: Request, res: Response): boolean {
+  if (!HTTP_ACCESS_TOKEN) {
+    res.status(503).json({ error: 'Set WECHATSYNC_HTTP_TOKEN before enabling remote MCP' })
+    return false
+  }
+  const supplied = (req.headers.authorization || '').replace(/^Bearer\s+/i, '')
+  const a = Buffer.from(supplied, 'utf8')
+  const b = Buffer.from(HTTP_ACCESS_TOKEN, 'utf8')
+  if (a.length !== b.length || !timingSafeEqual(a, b)) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return false
+  }
+  return true
+}
 
 /**
  * 创建 MCP Server
@@ -77,7 +98,7 @@ function createServer(): Server {
         },
         {
           name: 'sync_article',
-          description: '同步文章到指定平台（保存为草稿）。支持 Markdown 或 HTML 格式，优先使用 markdown 字段。重要：如果文章包含本地图片引用，必须先读取图片文件并转换为 base64 data URI 格式（如 ![img](data:image/png;base64,xxx)）。',
+          description: '同步文章到平台，默认仅保存草稿。知乎、掘金、CSDN 可在明确授权后正式发布，其他平台不可直接发布。',
           inputSchema: {
             type: 'object',
             properties: {
@@ -100,8 +121,13 @@ function createServer(): Server {
               },
               cover: {
                 type: 'string',
-                description: '封面图 URL 或 base64 data URI（可选）',
+                description: '封面图 URL 或 base64 data URI。省略时使用正文第一张有效图片。',
               },
+              summary: { type: 'string', description: '文章摘要' },
+              tags: { type: 'array', items: { type: 'string' }, description: '文章标签。CSDN 正式发布必须提供标签。' },
+              publish: { type: 'boolean', description: '显式 true 才正式发布（仅知乎、CSDN、掘金）' },
+              confirmPublish: { type: 'string', description: '正式发布时必须传 PUBLISH' },
+              idempotencyKey: { type: 'string', description: 'Manager 投递幂等标识，避免重复发稿' },
             },
             required: ['platforms', 'title', 'markdown'],
           },
@@ -171,17 +197,44 @@ function createServer(): Server {
           })
           break
 
-        case 'sync_article':
-          result = await bridge.request<SyncResult[]>('syncArticle', {
-            platforms: (args as { platforms: string[] }).platforms,
+        case 'sync_article': {
+          const input = args as {
+            platforms: string[]; title: string; content?: string; markdown?: string
+            cover?: string; summary?: string; tags?: string[]; publish?: boolean
+            confirmPublish?: string; idempotencyKey?: string
+          }
+          if (!Array.isArray(input.platforms) || input.platforms.length === 0 ||
+              !input.platforms.every(p => typeof p === 'string')) {
+            throw new Error('At least one valid platform ID is required')
+          }
+          if (!input.title || (!input.markdown && !input.content)) {
+            throw new Error('Title and article body are required')
+          }
+          if (input.publish) {
+            if (input.confirmPublish !== 'PUBLISH') {
+              throw new Error('正式发布必须明确传入 confirmPublish=PUBLISH')
+            }
+            const supported = new Set(['zhihu', 'juejin', 'csdn'])
+            if (input.platforms.some(p => !supported.has(p))) {
+              throw new Error('当前只支持知乎、掘金、CSDN 的正式发布，其他平台只能保存草稿')
+            }
+          }
+          result = await bridge.request('syncArticle', {
+            platforms: input.platforms,
             article: {
-              title: (args as { title: string }).title,
-              content: (args as { content: string }).content,
-              markdown: (args as { markdown?: string }).markdown,
-              cover: (args as { cover?: string }).cover,
+              title: input.title,
+              content: input.content,
+              markdown: input.markdown,
+              cover: input.cover,
+              summary: input.summary,
+              tags: input.tags,
             },
+            publish: input.publish === true,
+            confirmPublish: input.confirmPublish,
+            idempotencyKey: input.idempotencyKey,
           })
           break
+        }
 
         case 'extract_article':
           result = await bridge.request('extractArticle')
@@ -273,29 +326,41 @@ async function startSSEMode() {
   // 启动 WebSocket 服务器（Extension 连接）
   await bridge.start()
 
-  const server = createServer()
   const app = express()
-  let transport: SSEServerTransport | null = null
+  const sessions = new Map<string, { transport: SSEServerTransport; server: Server }>()
 
-  // SSE 端点
+  // Each client gets its own MCP Server/Transport; never route via a global transport.
   app.get('/sse', async (req: Request, res: Response) => {
-    console.error('[MCP] New SSE connection from Claude Code')
-    transport = new SSEServerTransport('/message', res)
-
+    if (!authorizeHttp(req, res)) return
+    const server = createServer()
+    const transport = new SSEServerTransport('/message', res)
+    sessions.set(transport.sessionId, { transport, server })
     res.on('close', () => {
-      console.error('[MCP] SSE connection closed')
-      transport = null
+      sessions.delete(transport.sessionId)
+      void server.close().catch(() => {})
     })
-
-    await server.connect(transport)
+    try {
+      await server.connect(transport)
+    } catch (error) {
+      sessions.delete(transport.sessionId)
+      console.error('[MCP] SSE connection failed:', error)
+      if (!res.headersSent) res.status(500).end()
+      else res.end()
+    }
   })
 
-  // 消息端点
-  app.post('/message', express.json(), async (req: Request, res: Response) => {
-    if (transport) {
-      await transport.handlePostMessage(req, res)
-    } else {
-      res.status(400).json({ error: 'No active SSE connection' })
+  app.post('/message', express.json({ limit: '4mb' }), async (req: Request, res: Response) => {
+    if (!authorizeHttp(req, res)) return
+    const session = sessions.get(String(req.query.sessionId || ''))
+    if (!session) {
+      res.status(404).json({ error: 'Unknown or expired SSE session' })
+      return
+    }
+    try {
+      await session.transport.handlePostMessage(req, res)
+    } catch (error) {
+      console.error('[MCP] Message failed:', error)
+      if (!res.headersSent) res.status(500).json({ error: 'MCP transport failure' })
     }
   })
 
@@ -315,7 +380,11 @@ async function startSSEMode() {
     })
   })
 
-  app.listen(HTTP_PORT, () => {
+  const host = process.env.SYNC_HTTP_HOST || '127.0.0.1'
+  if (BRIDGE_API_PORT === HTTP_PORT || WS_PORT === HTTP_PORT || BRIDGE_API_PORT === WS_PORT) {
+    throw new Error('SYNC_HTTP_PORT, SYNC_WS_PORT and SYNC_BRIDGE_API_PORT must be distinct')
+  }
+  app.listen(HTTP_PORT, host, () => {
     console.error('[MCP] Sync Assistant started (SSE mode)')
     console.error(`[MCP] HTTP Server: http://localhost:${HTTP_PORT}`)
     console.error(`[MCP] Claude Code: http://localhost:${HTTP_PORT}/sse`)
