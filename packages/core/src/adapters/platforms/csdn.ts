@@ -2,7 +2,7 @@
  * CSDN 适配器
  */
 import { CodeAdapter, type ImageUploadResult } from '../code-adapter'
-import type { Article, AuthResult, SyncResult, PlatformMeta } from '../../types'
+import type { Article, AuthResult, SyncResult, PlatformMeta, PublishVerification } from '../../types'
 import type { PublishOptions } from '../types'
 import { createLogger } from '../../lib/logger'
 
@@ -20,7 +20,7 @@ export class CSDNAdapter extends CodeAdapter {
     name: 'CSDN',
     icon: 'https://g.csdnimg.cn/static/logo/favicon32.ico',
     homepage: 'https://editor.csdn.net/md/',
-    capabilities: ['article', 'draft', 'image_upload'],
+    capabilities: ['article', 'draft', 'image_upload', 'categories', 'tags', 'direct_publish'],
   }
 
   /** 预处理配置: CSDN 使用 Markdown 格式 */
@@ -64,6 +64,19 @@ export class CSDNAdapter extends CodeAdapter {
 
   async checkAuth(): Promise<AuthResult> {
     try {
+      return await this.withHeaderRules(this.HEADER_RULES, () => this.checkAuthRequest())
+    } catch (error) {
+      // CSDN 的身份接口偶尔会被 CORS/WAF 拦截。网页已登录时，
+      // 使用 CSDN 自身的账号 + 会话 Cookie 作为受限回退，不读取密码。
+      const cookieAuth = await this.checkCookieAuth()
+      if (cookieAuth) return cookieAuth
+      logger.debug('checkAuth: not logged in -', error)
+      return { isAuthenticated: false, error: (error as Error).message }
+    }
+  }
+
+  private async checkAuthRequest(): Promise<AuthResult> {
+    try {
       // 使用带签名的 API
       const apiPath = '/blog-console-api/v3/editor/getBaseInfo'
       const headers = await this.signRequest(apiPath, 'GET')
@@ -78,35 +91,83 @@ export class CSDNAdapter extends CodeAdapter {
       )
 
       const res = await response.json() as {
-        code: number
+        code?: number | string
+        message?: string
+        msg?: string
         data?: {
-          name: string
-          nickname: string
-          avatar: string
-          blog_url: string
+          name?: string
+          username?: string
+          nickname?: string
+          nickName?: string
+          avatar?: string
+          avatarurl?: string
+          blog_url?: string
         }
       }
 
       logger.debug('checkAuth response:', res)
 
-      if (res.code === 200 && res.data?.name) {
+      const userId = res.data?.name || res.data?.username
+      const username = res.data?.nickname || res.data?.nickName || userId
+      const avatar = res.data?.avatar || res.data?.avatarurl || ''
+      if (Number(res.code) === 200 && userId) {
         this.userInfo = {
-          csdnid: res.data.name,
-          username: res.data.nickname || res.data.name,
-          avatarurl: res.data.avatar,
+          csdnid: userId,
+          username: username || userId,
+          avatarurl: avatar,
         }
         return {
           isAuthenticated: true,
-          userId: res.data.name,
-          username: res.data.nickname || res.data.name,
-          avatar: res.data.avatar,
+          userId,
+          username: username || userId,
+          avatar,
         }
       }
 
-      return { isAuthenticated: false }
+      const cookieAuth = await this.checkCookieAuth()
+      if (cookieAuth) return cookieAuth
+      return {
+        isAuthenticated: false,
+        error: res.msg || res.message || `CSDN 认证接口返回异常（${res.code ?? '无状态码'}）`,
+      }
     } catch (error) {
-      logger.debug('checkAuth: not logged in -', error)
-      return { isAuthenticated: false, error: (error as Error).message }
+      const cookieAuth = await this.checkCookieAuth()
+      if (cookieAuth) return cookieAuth
+      throw error
+    }
+  }
+
+  /**
+   * CSDN 网页登录会写入 UserName/UserToken；同时要求账号标识和
+   * 会话标识都存在，避免把遗留的昵称 Cookie 误判为有效登录。
+   */
+  private async checkCookieAuth(): Promise<AuthResult | null> {
+    if (!this.runtime.getCookie) return null
+    const domain = '.csdn.net'
+    const [rawUserId, rawNickname, userToken, session] = await Promise.all([
+      this.runtime.getCookie(domain, 'UserName'),
+      this.runtime.getCookie(domain, 'UserNick'),
+      this.runtime.getCookie(domain, 'UserToken'),
+      this.runtime.getCookie(domain, 'SESSION'),
+    ])
+    if (!rawUserId || (!userToken && !session)) return null
+
+    const decode = (value: string) => {
+      try {
+        return decodeURIComponent(value)
+      } catch {
+        return value
+      }
+    }
+    const userId = decode(rawUserId).trim()
+    const username = rawNickname ? decode(rawNickname).trim() : userId
+    if (!userId) return null
+
+    this.userInfo = { csdnid: userId, username: username || userId, avatarurl: '' }
+    return {
+      isAuthenticated: true,
+      userId,
+      username: username || userId,
     }
   }
 
@@ -208,65 +269,229 @@ export class CSDNAdapter extends CodeAdapter {
       // Get HTML content (CSDN API needs both markdown and HTML)
       const htmlContent = article.html || ''
 
-      // Generate signature and save article
-      const apiPath = '/blog-console-api/v3/mdeditor/saveArticle'
-      const headers = await this.signRequest(apiPath)
-
-      const response = await this.runtime.fetch(
-        `https://bizapi.csdn.net${apiPath}`,
-        {
-          method: 'POST',
-          credentials: 'include',
-          headers,
-          body: JSON.stringify({
-            title: article.title,
-            markdowncontent: markdown,
-            content: htmlContent,
-            readType: 'public',
-            level: 0,
-            tags: '',
-            status: 2, // 草稿
-            categories: '',
-            type: 'original',
-            original_link: '',
-            authorized_status: false,
-            not_auto_saved: '1',
-            source: 'pc_mdeditor',
-            cover_images: [],
-            cover_type: 1,
-            is_new: 1,
-            vote_id: 0,
-            resource_id: '',
-            pubStatus: 'draft',
-            creator_activity_id: '',
-          }),
-        }
-      )
-
-      const res = await response.json() as {
-        code: number
-        message?: string
-        msg?: string
-        data?: { id: string }
+      // CSDN requires a CSDN-hosted cover URL, not the site's external OG image.
+      let coverImage = article.cover || ''
+      if (coverImage && !/(?:csdnimg\.cn|csdn\.net)/i.test(coverImage)) {
+        const uploaded = await this.uploadImageByUrl(coverImage)
+        coverImage = uploaded.url
       }
 
-      logger.debug('Save response:', res)
-
-      if (res.code !== 200 || !res.data?.id) {
-        throw new Error(res.msg || res.message || '保存草稿失败')
+      const basePayload = {
+        title: article.title,
+        markdowncontent: markdown,
+        content: htmlContent,
+        readType: 'public',
+        level: 0,
+        tags: article.tags?.join(',') || '',
+        categories: article.category || '',
+        type: 'original',
+        original_link: '',
+        authorized_status: false,
+        not_auto_saved: '1',
+        source: 'pc_mdeditor',
+        cover_images: coverImage ? [coverImage] : [],
+        cover_type: coverImage ? 1 : 0,
+        is_new: 1,
+        vote_id: 0,
+        resource_id: '',
+        creator_activity_id: '',
       }
 
-      const postId = res.data.id
+      // 正式提交前先完整保存草稿，失败时仍可人工处理。
+      const draft = await this.saveArticle({
+        ...basePayload,
+        status: 2,
+        pubStatus: 'draft',
+      })
+      const postId = String(draft.id)
       const draftUrl = `https://editor.csdn.net/md?articleId=${postId}`
 
+      if (options?.draftOnly === false) {
+        if (!article.tags?.length) {
+          return this.createResult(false, {
+            postId,
+            postUrl: draftUrl,
+            draftOnly: true,
+            status: 'failed',
+            error: 'CSDN 正式发布至少需要一个标签',
+          })
+        }
+        try {
+          return await this.publishDraft(postId, {
+            ...basePayload,
+            id: postId,
+            status: 0,
+            pubStatus: 'publish',
+          }, article.title, {
+            userId: options.expectedUserId,
+            username: options.expectedUsername,
+          })
+        } catch (error) {
+          return this.createResult(false, {
+            postId,
+            postUrl: draftUrl,
+            draftOnly: true,
+            status: 'failed',
+            error: (error as Error).message,
+          })
+        }
+      }
+
       return this.createResult(true, {
-        postId: postId,
+        postId,
         postUrl: draftUrl,
-        draftOnly: options?.draftOnly ?? true,
+        draftOnly: true,
+        status: 'draft',
       })
     }).catch((error) => this.createResult(false, {
       error: (error as Error).message,
     }))
+  }
+
+  private async saveArticle(payload: Record<string, unknown>): Promise<{ id: string | number; url?: string }> {
+    const apiPath = '/blog-console-api/v3/mdeditor/saveArticle'
+    const headers = await this.signRequest(apiPath)
+    const response = await this.runtime.fetch(`https://bizapi.csdn.net${apiPath}`, {
+      method: 'POST',
+      credentials: 'include',
+      headers,
+      body: JSON.stringify(payload),
+    })
+    const responseText = await response.text()
+    logger.debug('Save article response:', response.status, responseText.substring(0, 300))
+    if (!response.ok) {
+      throw new Error(`CSDN 保存失败: ${response.status} - ${responseText.substring(0, 300)}`)
+    }
+    let res: {
+      code?: number
+      message?: string
+      msg?: string
+      data?: { id?: string | number; url?: string }
+    }
+    try {
+      res = JSON.parse(responseText)
+    } catch {
+      throw new Error(`CSDN 保存失败: 响应不是有效 JSON - ${responseText.substring(0, 200)}`)
+    }
+    if (res.code !== 200 || res.data?.id === undefined) {
+      throw new Error(res.msg || res.message || 'CSDN 保存失败')
+    }
+    return { id: res.data.id, url: res.data.url }
+  }
+
+  /** 最终提交只执行一次，不在适配器内自动重试。 */
+  private async publishDraft(
+    draftId: string,
+    payload: Record<string, unknown>,
+    expectedTitle: string,
+    expectedAuthor: { userId?: string; username?: string } = {},
+  ): Promise<SyncResult> {
+    const published = await this.saveArticle(payload)
+    const articleId = String(published.id || draftId)
+    const postUrl = published.url?.startsWith('http')
+      ? published.url
+      : `https://blog.csdn.net/${this.userInfo!.csdnid}/article/details/${articleId}`
+    const verification = await this.verifyPublished(articleId, {
+      title: expectedTitle,
+      userId: expectedAuthor.userId,
+      username: expectedAuthor.username,
+    })
+    if (verification.status === 'published') {
+      return this.createResult(true, {
+        postId: articleId,
+        postUrl: verification.postUrl || postUrl,
+        draftOnly: false,
+        status: 'published',
+        verification,
+        message: '文章已正式发布并通过公开页面验证',
+      })
+    }
+    const accepted: PublishVerification = {
+      verified: true,
+      status: 'submitted',
+      checkedAt: Date.now(),
+      method: 'publish_response',
+      postId: articleId,
+      postUrl,
+      expectedTitle,
+      visibility: 'unknown',
+      error: verification.error,
+    }
+    return this.createResult(true, {
+      postId: articleId,
+      postUrl,
+      draftOnly: false,
+      status: 'submitted',
+      verification: accepted,
+      message: 'CSDN 已接受发布请求，尚未通过公开页面确认，将进入只读复查',
+    })
+  }
+
+  async verifyPublished(
+    postId: string,
+    expected: { title?: string; userId?: string; username?: string } = {},
+  ): Promise<PublishVerification> {
+    const authorId = expected.userId || this.userInfo?.csdnid
+    const postUrl = authorId
+      ? `https://blog.csdn.net/${authorId}/article/details/${postId}`
+      : `https://blog.csdn.net/article/details/${postId}`
+    let lastError = '公开文章页暂不可用'
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const response = await this.runtime.fetch(postUrl, {
+          method: 'GET',
+          credentials: 'omit',
+          headers: { Accept: 'text/html' },
+        })
+        if (!response.ok) {
+          lastError = `公开文章验证失败: HTTP ${response.status}`
+        } else {
+          const html = await response.text()
+          const actualTitle = decodeHtmlEntities(
+            html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1]
+              || html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]
+              || '',
+          ).replace(/\s*[-_] ?CSDN博客.*$/i, '').trim() || undefined
+          const actualAuthorId = html.match(/https:\/\/blog\.csdn\.net\/([^/"'?]+)\/article\/details\//i)?.[1]
+            || authorId
+          const actualAuthorName = decodeHtmlEntities(
+            html.match(/<meta[^>]+name=["']author["'][^>]+content=["']([^"']+)["']/i)?.[1] || '',
+          ).trim() || undefined
+          const titleMatches = !expected.title || actualTitle === expected.title.trim()
+          const authorMatches = !expected.userId || actualAuthorId === expected.userId
+          const usernameMatches = !expected.username || !actualAuthorName || actualAuthorName === expected.username
+          const verified = Boolean(actualTitle) && titleMatches && authorMatches && usernameMatches
+          return {
+            verified,
+            status: verified ? 'published' : 'unknown',
+            checkedAt: Date.now(),
+            method: 'public_url',
+            postId,
+            postUrl,
+            expectedTitle: expected.title,
+            actualTitle,
+            authorId: actualAuthorId,
+            authorName: actualAuthorName,
+            visibility: verified ? 'public' : 'unknown',
+            error: verified ? undefined : '公开文章信息与预期 ID、标题或作者不一致',
+          }
+        }
+      } catch (error) {
+        lastError = `公开文章验证失败: ${(error as Error).message}`
+      }
+      if (attempt < 2) await this.delay(300 * (attempt + 1))
+    }
+    return {
+      verified: false,
+      status: 'unknown',
+      checkedAt: Date.now(),
+      method: 'public_url',
+      postId,
+      postUrl,
+      expectedTitle: expected.title,
+      visibility: 'unknown',
+      error: lastError,
+    }
   }
 
   /**
@@ -392,4 +617,14 @@ export class CSDNAdapter extends CodeAdapter {
       url: obsRes.data.imageUrl,
     }
   }
+}
+
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .replace(/&nbsp;/g, ' ')
 }

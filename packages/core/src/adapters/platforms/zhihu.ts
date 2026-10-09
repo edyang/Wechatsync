@@ -2,7 +2,7 @@
  * 知乎适配器
  */
 import { CodeAdapter, type ImageUploadResult } from '../code-adapter'
-import type { Article, AuthResult, SyncResult, PlatformMeta } from '../../types'
+import type { Article, AuthResult, SyncResult, PlatformMeta, PublishVerification } from '../../types'
 import type { PublishOptions } from '../types'
 import { createLogger } from '../../lib/logger'
 import md5Lib from 'js-md5'
@@ -12,13 +12,15 @@ const logger = createLogger('Zhihu')
 // js-md5 导出的是函数本身
 const jsMd5 = md5Lib as unknown as (message: string | ArrayBuffer | Uint8Array) => string
 
+const PUBLISH_INCLUDE = 'is_visible,paid_info,paid_info_content,has_column,admin_closed_comment,reward_info,annotation_action,annotation_detail,collapse_reason,is_normal,is_sticky,collapsed_by,suggest_edit,comment_count,thanks_count,favlists_count,can_comment,content,editable_content,voteup_count,reshipment_settings,comment_permission,created_time,updated_time,review_info,relevant_info,question,excerpt,attachment,content_source,is_labeled,endorsements,reaction_instruction,ip_info,relationship.is_authorized,voting,is_thanked,is_author,is_nothelp,is_favorited;author.vip_info,kvip_info,badge[*].topics;settings.table_of_content.enabled'
+
 export class ZhihuAdapter extends CodeAdapter {
   readonly meta: PlatformMeta = {
     id: 'zhihu',
     name: '知乎',
     icon: 'https://static.zhihu.com/static/favicon.ico',
     homepage: 'https://www.zhihu.com',
-    capabilities: ['article', 'draft', 'image_upload', 'tags', 'cover'],
+    capabilities: ['article', 'draft', 'image_upload', 'tags', 'cover', 'direct_publish'],
   }
 
   /** 预处理配置: 知乎使用 HTML，需要特殊处理 */
@@ -176,16 +178,241 @@ export class ZhihuAdapter extends CodeAdapter {
 
       logger.debug('Draft updated, status:', updateResponse.status)
 
-      const draftUrl = `https://zhuanlan.zhihu.com/p/${draftId}/edit`
+      if (options?.draftOnly === false) {
+        try {
+          return await this.publishDraft(draftId, content, article.title, {
+            userId: options.expectedUserId,
+            username: options.expectedUsername,
+          })
+        } catch (error) {
+          return this.createResult(false, {
+            postId: draftId,
+            postUrl: `https://zhuanlan.zhihu.com/p/${draftId}/edit`,
+            draftOnly: true,
+            status: 'failed',
+            error: (error as Error).message,
+          })
+        }
+      }
 
       return this.createResult(true, {
         postId: draftId,
-        postUrl: draftUrl,
-        draftOnly: options?.draftOnly ?? true,
+        postUrl: `https://zhuanlan.zhihu.com/p/${draftId}/edit`,
+        draftOnly: true,
+        status: 'draft',
       })
     }).catch((error) => this.createResult(false, {
       error: (error as Error).message,
     }))
+  }
+
+  /** 将已完整保存的文章草稿正式发布。仅在调用方显式传入 draftOnly=false 时执行。 */
+  private async publishDraft(
+    draftId: string,
+    content: string,
+    expectedTitle: string,
+    expectedAuthor: { userId?: string; username?: string } = {},
+  ): Promise<SyncResult> {
+    const textLength = content
+      .replace(/<[^>]*>/g, '')
+      .replace(/&(?:nbsp|ensp|emsp);/gi, ' ')
+      .replace(/&(?:lt|gt|amp|quot|apos);/gi, 'x')
+      .length
+    const businessParams = {
+      article_id: draftId,
+      reward_setting: { can_reward: false },
+      reshipment_settings: 'allowed',
+      thank_inviter: '',
+      comment_permission: 'all',
+      commercial_zhitask_bind_info: null,
+      column: null,
+      is_report: false,
+      thank_inviter_status: 'close',
+      table_of_contents_enabled: false,
+      disclaimer_status: 'close',
+      disclaimer_type: 'none',
+      commercial_report_info: { is_report: false },
+    }
+    const publishBody = {
+      action: 'article',
+      data: {
+        hybridInfo: {},
+        toFollower: {},
+        publish: {
+          traceId: `${Math.floor(Date.now() / 1000)},${crypto.randomUUID()}`,
+        },
+        extra_info: {
+          publisher: 'pc',
+          include: PUBLISH_INCLUDE,
+          pc_business_params: JSON.stringify(businessParams),
+        },
+        draft: {
+          disabled: 1,
+          // 草稿已经创建并完整保存，知乎发布接口要求按已有内容处理。
+          isPublished: true,
+          id: draftId,
+        },
+        hybrid: {
+          html: content,
+          textLength,
+        },
+        reprint: { reshipment_settings: 'allowed' },
+        commentsPermission: { comment_permission: 'all' },
+        appreciate: { can_reward: false, tagline: '' },
+        publishSwitch: { draft_type: 'normal' },
+        creationStatement: {
+          disclaimer_type: 'none',
+          disclaimer_status: 'closed',
+        },
+        contentsTables: { table_of_contents_enabled: false },
+        commercialReportInfo: { isReport: 0 },
+        thanksInvitation: {
+          thank_inviter_status: 'close',
+          thank_inviter: '',
+        },
+      },
+    }
+
+    const response = await this.runtime.fetch('https://www.zhihu.com/api/v4/content/publish', {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-requested-with': 'fetch',
+      },
+      body: JSON.stringify(publishBody),
+    })
+    const responseText = await response.text()
+    if (!response.ok) {
+      throw new Error(`正式发布失败: ${response.status} - ${responseText.substring(0, 300)}`)
+    }
+
+    let data: { code?: number; message?: string; data?: { result?: string } }
+    try {
+      data = JSON.parse(responseText)
+    } catch {
+      throw new Error(`正式发布失败: 响应不是有效 JSON - ${responseText.substring(0, 200)}`)
+    }
+    if (data.code !== 0) {
+      const detail = responseText.length > 300 ? `${responseText.substring(0, 300)}...` : responseText
+      throw new Error(`正式发布失败: ${data.message || `错误码 ${data.code ?? 'unknown'}`} (${detail})`)
+    }
+
+    let publishedId = draftId
+    let isReviewing = false
+    if (data.data?.result) {
+      try {
+        const result = JSON.parse(data.data.result) as {
+          publish?: { id?: string | number; review_info?: { is_reviewing?: boolean } }
+        }
+        if (result.publish?.id) publishedId = String(result.publish.id)
+        if (result.publish?.review_info?.is_reviewing) isReviewing = true
+      } catch {
+        logger.warn('Publish result payload is not valid JSON; using draft id as article id')
+      }
+    }
+
+    const postUrl = `https://zhuanlan.zhihu.com/p/${publishedId}`
+    const verification: PublishVerification = isReviewing
+      ? {
+          verified: true,
+          status: 'reviewing',
+          checkedAt: Date.now(),
+          method: 'publish_response',
+          postId: publishedId,
+          postUrl,
+          expectedTitle,
+          visibility: 'unknown',
+        }
+      : await this.verifyPublished(publishedId, {
+          title: expectedTitle,
+          userId: expectedAuthor.userId,
+          username: expectedAuthor.username,
+        })
+
+    return this.createResult(true, {
+      postId: publishedId,
+      postUrl,
+      draftOnly: false,
+      status: verification.status,
+      verification,
+      message: verification.status === 'published'
+        ? '文章已正式发布并通过公开页面验证'
+        : verification.status === 'reviewing'
+          ? '文章已提交，正在等待知乎审核'
+          : '知乎已接受发布请求，但暂时无法确认公开状态',
+    })
+  }
+
+  async verifyPublished(
+    postId: string,
+    expected: { title?: string; userId?: string; username?: string } = {},
+  ): Promise<PublishVerification> {
+    const postUrl = `https://zhuanlan.zhihu.com/p/${postId}`
+    let lastError = '公开文章接口暂不可用'
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const response = await this.runtime.fetch(`https://www.zhihu.com/api/v4/articles/${postId}`, {
+          method: 'GET',
+          credentials: 'omit',
+          headers: { 'x-requested-with': 'fetch' },
+        })
+        if (!response.ok) {
+          lastError = `公开文章验证失败: HTTP ${response.status}`
+        } else {
+          const data = await response.json() as {
+            id?: string | number
+            title?: string
+            is_published?: boolean
+            review_info?: { is_reviewing?: boolean }
+            author?: { id?: string; name?: string }
+          }
+          const actualId = data.id === undefined ? undefined : String(data.id)
+          const titleMatches = !expected.title || data.title?.trim() === expected.title.trim()
+          const authorMatches = !expected.userId || data.author?.id === expected.userId
+          const usernameMatches = !expected.username || data.author?.name === expected.username
+          const idMatches = actualId === postId
+          const status = data.review_info?.is_reviewing
+            ? 'reviewing'
+            : data.is_published === false
+              ? 'submitted'
+              : 'published'
+          const verified = idMatches && titleMatches && authorMatches && usernameMatches
+
+          return {
+            verified,
+            status: verified ? status : 'unknown',
+            checkedAt: Date.now(),
+            method: 'public_api',
+            postId: actualId || postId,
+            postUrl,
+            expectedTitle: expected.title,
+            actualTitle: data.title,
+            authorId: data.author?.id,
+            authorName: data.author?.name,
+            visibility: verified && status === 'published' ? 'public' : 'unknown',
+            error: verified ? undefined : '公开文章信息与预期 ID、标题或作者不一致',
+          }
+        }
+      } catch (error) {
+        lastError = `公开文章验证失败: ${(error as Error).message}`
+      }
+
+      if (attempt < 2) await this.delay(300 * (attempt + 1))
+    }
+
+    return {
+      verified: false,
+      status: 'unknown',
+      checkedAt: Date.now(),
+      method: 'public_api',
+      postId,
+      postUrl,
+      expectedTitle: expected.title,
+      visibility: 'unknown',
+      error: lastError,
+    }
   }
 
   /**
