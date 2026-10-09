@@ -49,10 +49,61 @@ jobs:
           npm install --omit=dev --ignore-scripts --no-audit --no-fund
           cd ..
           zip -qr Wechatsync-Baize-MCP-Server.zip mcp-server
+      - name: Prepare Linux systemd installation bundle
+        run: |
+          set -euo pipefail
+          bundle=out/wechatsync-mcp-linux
+          mkdir -p "$bundle"
+          cp -a out/mcp-server "$bundle/mcp-server"
+          for f in install.sh manage.sh status.sh logs.sh uninstall.sh; do
+            install -m 0755 "deploy/linux/$f" "$bundle/$f"
+          done
+          install -m 0644 deploy/linux/.env.example "$bundle/.env.example"
+          install -m 0644 deploy/linux/README.md "$bundle/README.md"
+          (cd out && zip -qr Wechatsync-Baize-MCP-Linux.zip wechatsync-mcp-linux)
+      - name: Validate Linux bundle files and Bash syntax
+        run: |
+          set -euo pipefail
+          for f in install.sh manage.sh status.sh logs.sh uninstall.sh; do
+            bash -n "out/wechatsync-mcp-linux/$f"
+            unzip -Z1 out/Wechatsync-Baize-MCP-Linux.zip | grep -Fxq "wechatsync-mcp-linux/$f"
+          done
+          unzip -Z1 out/Wechatsync-Baize-MCP-Linux.zip | grep -Fxq 'wechatsync-mcp-linux/.env.example'
+          unzip -Z1 out/Wechatsync-Baize-MCP-Linux.zip | grep -Fxq 'wechatsync-mcp-linux/mcp-server/dist/index.js'
+          unzip -tq out/Wechatsync-Baize-MCP-Linux.zip
+          node --check out/wechatsync-mcp-linux/mcp-server/dist/index.js
+      - name: Smoke test Linux systemd service
+        run: |
+          set -euo pipefail
+          if [ ! -d /run/systemd/system ]; then
+            echo "No running systemd in this CI host; package syntax checks already passed."
+            exit 0
+          fi
+          cleanup() {
+            sudo bash out/wechatsync-mcp-linux/uninstall.sh --purge || true
+          }
+          trap cleanup EXIT
+          sudo bash out/wechatsync-mcp-linux/install.sh
+          sudo systemctl is-active --quiet wechatsync-mcp.service
+          curl -fsS --max-time 5 http://127.0.0.1:9528/health |
+            python3 -c 'import json,sys; assert json.load(sys.stdin)["status"] == "ok"'
+          test "$(sudo stat -c %a /etc/wechatsync-mcp/.env)" = 600
+          original_hash="$(sudo sha256sum /etc/wechatsync-mcp/.env | awk '{print $1}')"
+          sudo bash out/wechatsync-mcp-linux/install.sh
+          test "$original_hash" = "$(sudo sha256sum /etc/wechatsync-mcp/.env | awk '{print $1}')"
+          sudo /opt/wechatsync-mcp/bin/manage.sh restart
+          sudo /opt/wechatsync-mcp/bin/status.sh > /dev/null
+          sudo /opt/wechatsync-mcp/bin/logs.sh --lines 10 > /dev/null
+          sudo /opt/wechatsync-mcp/bin/uninstall.sh
+          sudo test -f /etc/wechatsync-mcp/.env
+          test ! -d /opt/wechatsync-mcp
+          sudo bash out/wechatsync-mcp-linux/uninstall.sh --purge
+          sudo test ! -f /etc/wechatsync-mcp/.env
+          trap - EXIT
       - name: Checksums
         run: |
           cd out
-          sha256sum Wechatsync-Baize-Chrome-v2.zip Wechatsync-Baize-MCP-Server.zip > SHA256SUMS.txt
+          sha256sum Wechatsync-Baize-Chrome-v2.zip Wechatsync-Baize-MCP-Server.zip Wechatsync-Baize-MCP-Linux.zip > SHA256SUMS.txt
       - name: Upload Chrome ZIP
         uses: actions/upload-artifact@v4
         with:
@@ -64,6 +115,12 @@ jobs:
         with:
           name: Wechatsync-Baize-MCP-Server
           path: out/Wechatsync-Baize-MCP-Server.zip
+          if-no-files-found: error
+      - name: Upload Linux systemd installer ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wechatsync-Baize-MCP-Linux
+          path: out/Wechatsync-Baize-MCP-Linux.zip
           if-no-files-found: error
       - name: Upload checksum manifest
         uses: actions/upload-artifact@v4

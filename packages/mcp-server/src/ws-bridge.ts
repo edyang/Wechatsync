@@ -31,10 +31,12 @@ export class ExtensionBridge {
   // 是否静默模式（CLI 使用时不输出日志）
   private silent: boolean = false
   private apiPort: number
+  private host: string
 
-  constructor(private port: number = 9527, options?: { silent?: boolean; apiPort?: number }) {
+  constructor(private port: number = 9527, options?: { silent?: boolean; apiPort?: number; host?: string }) {
     this.silent = options?.silent ?? false
     this.apiPort = options?.apiPort ?? port + 1
+    this.host = options?.host ?? '127.0.0.1'
     if (!this.silent) {
       if (this.token) {
         console.error('[Bridge] Token authentication enabled')
@@ -68,10 +70,10 @@ export class ExtensionBridge {
   private startServer(): Promise<void> {
     return new Promise((resolve, reject) => {
       try {
-        this.wss = new WebSocketServer({ port: this.port })
+        this.wss = new WebSocketServer({ port: this.port, host: this.host })
 
         this.wss.on('listening', () => {
-          if (!this.silent) console.error(`[Bridge] WebSocket server listening on port ${this.port}`)
+          if (!this.silent) console.error(`[Bridge] WebSocket server listening on ${this.host}:${this.port}`)
           // WebSocket 启动成功后，启动 HTTP API
           this.startHttpApi()
             .then(resolve)

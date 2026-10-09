@@ -21,6 +21,7 @@ import { ExtensionBridge } from './ws-bridge.js'
 import type { PlatformInfo, SyncResult } from './types.js'
 
 const WS_PORT = parseInt(process.env.SYNC_WS_PORT || '9527', 10)
+const WS_HOST = process.env.SYNC_WS_HOST || '127.0.0.1'
 const HTTP_PORT = parseInt(process.env.SYNC_HTTP_PORT || '9528', 10)
 
 // 检查是否是 SSE 模式
@@ -31,6 +32,7 @@ const isSSEMode = process.argv.includes('--sse')
 const BRIDGE_API_PORT = parseInt(process.env.SYNC_BRIDGE_API_PORT || String(HTTP_PORT + 1), 10)
 const bridge = new ExtensionBridge(WS_PORT, {
   apiPort: isSSEMode ? BRIDGE_API_PORT : WS_PORT + 1,
+  host: WS_HOST,
 })
 
 const HTTP_ACCESS_TOKEN = process.env.WECHATSYNC_HTTP_TOKEN || ''
@@ -316,7 +318,7 @@ async function startStdioMode() {
 
   // 日志输出到 stderr（不影响 stdio 通信）
   console.error('[MCP] Sync Assistant started (stdio mode)')
-  console.error(`[MCP] Extension WebSocket: ws://localhost:${WS_PORT}`)
+  console.error(`[MCP] Extension WebSocket: ws://${WS_HOST}:${WS_PORT}`)
 }
 
 /**
@@ -388,7 +390,7 @@ async function startSSEMode() {
     console.error('[MCP] Sync Assistant started (SSE mode)')
     console.error(`[MCP] HTTP Server: http://localhost:${HTTP_PORT}`)
     console.error(`[MCP] Claude Code: http://localhost:${HTTP_PORT}/sse`)
-    console.error(`[MCP] Extension WebSocket: ws://localhost:${WS_PORT}`)
+    console.error(`[MCP] Extension WebSocket: ws://${WS_HOST}:${WS_PORT}`)
   })
 }
 
