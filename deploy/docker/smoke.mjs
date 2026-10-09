@@ -38,8 +38,24 @@ for (let i = 0; i < 10; i++) {
   await pause(200)
 }
 assert.ok(connected, 'WebSocket connection must become visible via health')
+
+// Chrome may reconnect while the old socket is closing. Its old "close"
+// callback must not mark the newly connected Chrome session as disconnected.
+const newestWs = new WebSocket('ws://127.0.0.1:' + wsPort)
+await new Promise((resolve, reject) => {
+  const timeout = setTimeout(() => reject(new Error('Simulated Chrome reconnect failed')), 4000)
+  newestWs.addEventListener('open', () => { clearTimeout(timeout); resolve() }, { once: true })
+  newestWs.addEventListener('error', () => { clearTimeout(timeout); reject(new Error('Reconnected WS failed')) }, { once: true })
+})
+await new Promise(resolve => {
+  ws.addEventListener('close', resolve, { once: true })
+  ws.close()
+})
+assert.equal((await awaitHealth()).extensionConnected, true,
+  'Old socket closing must not clear the newer active Chrome socket')
+
 // Emulate the Chrome extension, without using a real account or posting content.
-ws.addEventListener('message', (event) => {
+newestWs.addEventListener('message', (event) => {
   const message = JSON.parse(event.data)
   assert.equal(message.token, env.WECHATSYNC_TOKEN)
   if (message.method === 'listPlatforms') {
@@ -150,8 +166,8 @@ try {
 } finally {
   clearTimeout(globalTimeout)
   controller.abort()
-  ws.close()
+  newestWs.close()
 }
 
-console.log('PASS: Docker health, SSE Bearer, Chrome WS, MCP initialize, tools/list, tools/call')
+console.log('PASS: Docker health, SSE Bearer, Chrome WS, reconnect race, MCP initialize, tools/list, tools/call')
 

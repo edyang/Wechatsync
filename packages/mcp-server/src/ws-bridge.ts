@@ -95,8 +95,14 @@ export class ExtensionBridge {
           })
 
           ws.on('close', () => {
-            if (!this.silent) console.error('[Bridge] Extension disconnected')
-            this.client = null
+            // A previous connection can close after Chrome has reconnected.
+            // Never clear the newer, still-active extension socket.
+            if (this.client === ws) {
+              this.client = null
+              if (!this.silent) console.error('[Bridge] Extension disconnected')
+            } else if (!this.silent) {
+              console.error('[Bridge] Stale extension socket closed (active session preserved)')
+            }
           })
 
           ws.on('error', (error: Error) => {
