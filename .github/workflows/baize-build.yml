@@ -1,0 +1,73 @@
+name: Baize Wechatsync installers
+
+on:
+  push:
+    branches:
+      - feat/baize-mcp-direct-publish-20261009
+  pull_request:
+    branches:
+      - v2
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-build-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Setup pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@9.15.9 --activate
+      - name: Install monorepo dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Core and MCP build
+        run: |
+          pnpm --filter @wechatsync/core run build
+          pnpm --filter @wechatsync/mcp-server run build
+      - name: Chrome extension tests
+        run: pnpm --filter @wechatsync/extension run test
+      - name: Chrome extension build
+        run: pnpm --filter @wechatsync/extension run build
+      - name: Package Chrome extension
+        run: |
+          mkdir -p out
+          cd packages/extension/dist
+          zip -qr ../../../out/Wechatsync-Baize-Chrome-v2.zip .
+      - name: Prepare self-contained MCP Node.js package
+        run: |
+          mkdir -p out/mcp-server
+          cp packages/mcp-server/package.json out/mcp-server/
+          cp -R packages/mcp-server/dist out/mcp-server/
+          cd out/mcp-server
+          npm install --omit=dev --ignore-scripts --no-audit --no-fund
+          cd ..
+          zip -qr Wechatsync-Baize-MCP-Server.zip mcp-server
+      - name: Checksums
+        run: |
+          cd out
+          sha256sum Wechatsync-Baize-Chrome-v2.zip Wechatsync-Baize-MCP-Server.zip > SHA256SUMS.txt
+      - name: Upload Chrome ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wechatsync-Baize-Chrome-v2
+          path: out/Wechatsync-Baize-Chrome-v2.zip
+          if-no-files-found: error
+      - name: Upload MCP server ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wechatsync-Baize-MCP-Server
+          path: out/Wechatsync-Baize-MCP-Server.zip
+          if-no-files-found: error
+      - name: Upload checksum manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: SHA256SUMS
+          path: out/SHA256SUMS.txt
+          if-no-files-found: error

@@ -117,13 +117,9 @@ export class ExtensionBridge {
   private startHttpApi(): Promise<void> {
     return new Promise((resolve, reject) => {
       this.httpServer = http.createServer(async (req, res) => {
-        // CORS headers
-        res.setHeader('Access-Control-Allow-Origin', '*')
-        res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS')
-        res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
-
+        // This loopback-only bridge API must never be callable by arbitrary websites.
         if (req.method === 'OPTIONS') {
-          res.writeHead(200)
+          res.writeHead(403)
           res.end()
           return
         }
@@ -138,6 +134,11 @@ export class ExtensionBridge {
         }
 
         if (req.method === 'POST' && req.url === '/request') {
+          if (!this.token || req.headers['x-bridge-token'] !== this.token) {
+            res.writeHead(401)
+            res.end('Unauthorized')
+            return
+          }
           let body = ''
           req.on('data', chunk => body += chunk)
           req.on('end', async () => {
@@ -451,13 +452,14 @@ export class ExtensionBridge {
     return new Promise((resolve, reject) => {
       const data = JSON.stringify({ method, params })
       const options = {
-        hostname: 'localhost',
+        hostname: '127.0.0.1',
         port: this.apiPort,
         path: '/request',
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(data)
+          'Content-Length': Buffer.byteLength(data),
+          'X-Bridge-Token': this.token
         }
       }
 
