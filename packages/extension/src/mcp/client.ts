@@ -9,6 +9,7 @@ import {
 import { markdownToHtml } from '@wechatsync/core'
 import { createLogger } from '../lib/logger'
 import { performSync } from '../background/sync-service'
+import { firstContentImage } from './first-image'
 
 const logger = createLogger('MCPClient')
 
@@ -43,6 +44,7 @@ const DEFAULT_SERVER_URL = 'ws://localhost:9527'
 
 class McpClient {
   private ws: WebSocket | null = null
+  private readonly inFlightRequests = new Set<string>()
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private serverUrl = DEFAULT_SERVER_URL
 
@@ -325,48 +327,88 @@ class McpClient {
       case 'syncArticle': {
         const platforms = params?.platforms as string[]
         const articleData = params?.article as {
-          title: string
-          content?: string
-          markdown?: string
-          cover?: string
+          title: string; content?: string; markdown?: string; cover?: string
+          summary?: string; tags?: string[]
         }
+        const publish = params?.publish === true
 
-        if (!platforms?.length) throw new Error('Missing platforms parameter')
+        if (!Array.isArray(platforms) || !platforms.length ||
+            !platforms.every(p => typeof p === 'string')) {
+          throw new Error('Missing or invalid platforms parameter')
+        }
         if (!articleData?.title) throw new Error('Missing article title')
         if (!articleData?.markdown && !articleData?.content) {
           throw new Error('Missing article content (markdown or content required)')
         }
+        if (publish) {
+          if (params?.confirmPublish !== 'PUBLISH') {
+            throw new Error('正式发布必须传入 confirmPublish="PUBLISH"')
+          }
+          const allowed = new Set(['zhihu', 'csdn', 'juejin'])
+          if (platforms.some(platform => !allowed.has(platform))) {
+            throw new Error('当前只有知乎、CSDN、掘金支持 MCP 正式发布，请改为草稿模式')
+          }
+          const states = await Promise.all(platforms.map(p => checkPlatformAuth(p)))
+          if (states.some(state => !state.isAuthenticated)) {
+            throw new Error('正式发布前必须在 Chrome 中登录全部目标平台')
+          }
+        }
 
-        // 优先使用 markdown，转换为 HTML
         let htmlContent = articleData.content || ''
         const markdown = articleData.markdown || ''
-
         if (markdown) {
           try {
             htmlContent = markdownToHtml(markdown)
           } catch (e) {
             logger.error('Markdown conversion failed:', e)
-            // 如果转换失败，使用简单的换行处理
             htmlContent = markdown.replace(/\n/g, '<br>')
           }
         }
-
         const article = {
           title: articleData.title,
           content: htmlContent,
           html: htmlContent,
-          markdown: markdown,
-          cover: articleData.cover,
+          markdown,
+          cover: articleData.cover || firstContentImage(markdown, htmlContent),
+          summary: articleData.summary,
+          tags: Array.isArray(articleData.tags) ? articleData.tags.filter(t => typeof t === 'string') : undefined,
         }
 
-        // 使用 sync-service 进行同步（支持 DSL 平台 + CMS 账户、历史记录、状态保存）
-        const { results, syncId } = await performSync(
-          article,
-          platforms,
-          { source: 'mcp' }
-        )
-
-        return { results, syncId }
+        // A persisted "started" key is intentionally NOT retried after an
+        // interrupted remote call: it may have created a platform draft/post.
+        const rawKey = params?.idempotencyKey
+        const idempotencyKey = typeof rawKey === 'string' && /^[a-zA-Z0-9_-]{8,128}$/.test(rawKey)
+          ? 'baizeMcpDispatch:' + rawKey : ''
+        if (rawKey && !idempotencyKey) throw new Error('Invalid idempotencyKey')
+        if (idempotencyKey && this.inFlightRequests.has(idempotencyKey)) {
+          throw new Error('相同投递请求仍在进行，请勿重复提交')
+        }
+        if (idempotencyKey) {
+          const prev = (await chrome.storage.local.get(idempotencyKey))[idempotencyKey]
+          if (prev) {
+            if (prev.state === 'complete' && prev.result) return prev.result
+            throw new Error('该投递曾经启动但结果待核实，请检查平台后台，禁止自动重发')
+          }
+          this.inFlightRequests.add(idempotencyKey)
+        }
+        try {
+          if (idempotencyKey) {
+            await chrome.storage.local.set({ [idempotencyKey]: { state: 'started', createdAt: Date.now() } })
+          }
+          const { results, syncId } = await performSync(article, platforms, {
+            source: 'mcp',
+            draftOnly: !publish,
+          })
+          const outcome = { results, syncId }
+          if (idempotencyKey) {
+            await chrome.storage.local.set({
+              [idempotencyKey]: { state: 'complete', completedAt: Date.now(), result: outcome },
+            })
+          }
+          return outcome
+        } finally {
+          if (idempotencyKey) this.inFlightRequests.delete(idempotencyKey)
+        }
       }
 
       case 'extractArticle': {
