@@ -483,7 +483,8 @@ export async function syncToMultiplePlatforms(
   platformIds: string[],
   article: Article,
   callbacks?: SyncCallbacks,
-  source = 'popup' // 来源：popup, weixin, weixin-editor, mcp 等
+  source = 'popup', // 来源：popup, weixin, weixin-editor, mcp 等
+  options: { draftOnly?: boolean } = {}
 ): Promise<SyncResult[]> {
   // 创建新的取消控制器
   syncAbortController = new AbortController()
@@ -565,7 +566,7 @@ export async function syncToMultiplePlatforms(
     const result = await syncToPlatform(
       platformId,
       article,
-      undefined,
+      { draftOnly: options.draftOnly ?? true },
       wrappedImageProgress
     )
 
