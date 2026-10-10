@@ -1,5 +1,7 @@
 # 文章同步助手 (Wechatsync)
 
+> **本 Fork 的平台覆盖说明**：下面的“29+ 平台”描述官方完整插件。公开源码通过私有子模块加载其中10个适配器，源码构建的白泽版不会包含它们。因此简书、什么值得买、搜狐焦点、头条等在该构建包中不会出现。需要这些平台时使用官方完整插件，并复用现有 MCP 服务；Manager v2.3.1 已补齐映射与适配器预检。详见 [平台覆盖与安装路径](docs/BAIZE_PLATFORM_COVERAGE.md)。
+
 ![](https://img.shields.io/github/v/release/wechatsync/Wechatsync.svg)
 ![](https://img.shields.io/github/last-commit/wechatsync/Wechatsync)
 ![](https://img.shields.io/github/issues/wechatsync/Wechatsync)
