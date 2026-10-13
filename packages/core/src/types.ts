@@ -19,6 +19,51 @@ export interface Article {
   }
 }
 
+export type PublishStatus =
+  | 'draft'
+  | 'submitted'
+  | 'reviewing'
+  | 'scheduled'
+  | 'published'
+  | 'action_required'
+  | 'rejected'
+  | 'failed'
+  | 'unknown'
+
+export type PublishVisibility = 'public' | 'private' | 'unlisted' | 'unknown'
+
+export type PublishInterventionReason =
+  | 'captcha'
+  | 'login_required'
+  | 'identity_mismatch'
+  | 'rate_limited'
+  | 'review_rejected'
+  | 'content_rejected'
+  | 'unknown'
+
+export interface PublishIntervention {
+  reason: PublishInterventionReason
+  message: string
+  action: string
+  detectedAt: number
+  retryPublish: false
+}
+
+export interface PublishVerification {
+  verified: boolean
+  status: PublishStatus
+  checkedAt: number
+  method: 'publish_response' | 'public_api' | 'public_url' | 'cms_response'
+  postId?: string
+  postUrl?: string
+  expectedTitle?: string
+  actualTitle?: string
+  authorId?: string
+  authorName?: string
+  visibility?: PublishVisibility
+  error?: string
+}
+
 /**
  * 同步结果
  */
@@ -28,6 +73,9 @@ export interface SyncResult {
   postId?: string
   postUrl?: string
   draftOnly?: boolean  // 是否只保存了草稿
+  status?: PublishStatus
+  verification?: PublishVerification
+  intervention?: PublishIntervention
   error?: string
   message?: string  // 额外提示信息
   timestamp: number
@@ -55,6 +103,7 @@ export type PlatformCapability =
   | 'tags'         // 标签
   | 'cover'        // 封面图
   | 'schedule'     // 定时发布
+  | 'direct_publish' // 支持从完整草稿继续正式发布
 
 /**
  * 平台元信息

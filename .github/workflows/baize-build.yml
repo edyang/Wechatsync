@@ -1,0 +1,182 @@
+name: Baize Wechatsync installers
+
+on:
+  push:
+    branches:
+      - feat/baize-mcp-direct-publish-20261009
+  pull_request:
+    branches:
+      - v2
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-build-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Setup pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@9.15.9 --activate
+      - name: Install monorepo dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Core and MCP build
+        run: |
+          pnpm --filter @wechatsync/core run build
+          pnpm --filter @wechatsync/mcp-server run build
+      - name: Chrome extension tests
+        run: pnpm --filter @wechatsync/extension run test
+      - name: Chrome extension build
+        run: pnpm --filter @wechatsync/extension run build
+      - name: Package Chrome extension
+        run: |
+          mkdir -p out
+          cd packages/extension/dist
+          zip -qr ../../../out/Wechatsync-Baize-Chrome-v2.zip .
+      - name: Prepare self-contained MCP Node.js package
+        run: |
+          mkdir -p out/mcp-server
+          cp packages/mcp-server/package.json out/mcp-server/
+          cp -R packages/mcp-server/dist out/mcp-server/
+          cd out/mcp-server
+          npm install --omit=dev --ignore-scripts --no-audit --no-fund
+          cd ..
+          zip -qr Wechatsync-Baize-MCP-Server.zip mcp-server
+      - name: Prepare Linux systemd installation bundle
+        run: |
+          set -euo pipefail
+          bundle=out/wechatsync-mcp-linux
+          mkdir -p "$bundle"
+          cp -a out/mcp-server "$bundle/mcp-server"
+          for f in install.sh manage.sh status.sh logs.sh uninstall.sh; do
+            install -m 0755 "deploy/linux/$f" "$bundle/$f"
+          done
+          install -m 0644 deploy/linux/.env.example "$bundle/.env.example"
+          install -m 0644 deploy/linux/README.md "$bundle/README.md"
+          (cd out && zip -qr Wechatsync-Baize-MCP-Linux.zip wechatsync-mcp-linux)
+      - name: Validate Linux bundle files and Bash syntax
+        run: |
+          set -euo pipefail
+          for f in install.sh manage.sh status.sh logs.sh uninstall.sh; do
+            bash -n "out/wechatsync-mcp-linux/$f"
+            unzip -Z1 out/Wechatsync-Baize-MCP-Linux.zip | grep -Fxq "wechatsync-mcp-linux/$f"
+          done
+          unzip -Z1 out/Wechatsync-Baize-MCP-Linux.zip | grep -Fxq 'wechatsync-mcp-linux/.env.example'
+          unzip -Z1 out/Wechatsync-Baize-MCP-Linux.zip | grep -Fxq 'wechatsync-mcp-linux/mcp-server/dist/index.js'
+          unzip -tq out/Wechatsync-Baize-MCP-Linux.zip
+          node --check out/wechatsync-mcp-linux/mcp-server/dist/index.js
+      - name: Smoke test Linux systemd service
+        run: |
+          set -euo pipefail
+          if [ ! -d /run/systemd/system ]; then
+            echo "No running systemd in this CI host; package syntax checks already passed."
+            exit 0
+          fi
+          cleanup() {
+            sudo bash out/wechatsync-mcp-linux/uninstall.sh --purge || true
+          }
+          trap cleanup EXIT
+          sudo bash out/wechatsync-mcp-linux/install.sh
+          sudo systemctl is-active --quiet wechatsync-mcp.service
+          curl -fsS --max-time 5 http://127.0.0.1:9528/health |
+            python3 -c 'import json,sys; assert json.load(sys.stdin)["status"] == "ok"'
+          test "$(sudo stat -c %a /etc/wechatsync-mcp/.env)" = 600
+          original_hash="$(sudo sha256sum /etc/wechatsync-mcp/.env | awk '{print $1}')"
+          sudo bash out/wechatsync-mcp-linux/install.sh
+          test "$original_hash" = "$(sudo sha256sum /etc/wechatsync-mcp/.env | awk '{print $1}')"
+          sudo /opt/wechatsync-mcp/bin/manage.sh restart
+          sudo /opt/wechatsync-mcp/bin/status.sh > /dev/null
+          sudo /opt/wechatsync-mcp/bin/logs.sh --lines 10 > /dev/null
+          sudo /opt/wechatsync-mcp/bin/uninstall.sh
+          sudo test -f /etc/wechatsync-mcp/.env
+          test ! -d /opt/wechatsync-mcp
+          sudo bash out/wechatsync-mcp-linux/uninstall.sh --purge
+          sudo test ! -f /etc/wechatsync-mcp/.env
+          trap - EXIT
+      - name: Build Baize MCP Docker image
+        run: |
+          set -euo pipefail
+          docker build --progress=plain -f deploy/docker/Dockerfile -t baize-wechatsync-mcp:baize-dev .
+          docker image inspect baize-wechatsync-mcp:baize-dev --format '{{.Id}} {{.Architecture}}'
+      - name: Package offline Docker Compose bundle
+        run: |
+          set -euo pipefail
+          bundle=out/wechatsync-mcp-docker
+          mkdir -p "$bundle"
+          cp deploy/docker/compose.yaml "$bundle/compose.yaml"
+          cp deploy/docker/.env.example "$bundle/.env.example"
+          cp deploy/docker/README.md "$bundle/README.md"
+          cp deploy/docker/smoke.mjs "$bundle/smoke.mjs"
+          for f in install.sh manage.sh uninstall.sh; do
+            install -m 0755 "deploy/docker/$f" "$bundle/$f"
+            bash -n "$bundle/$f"
+          done
+          docker save baize-wechatsync-mcp:baize-dev | gzip -1 > "$bundle/image.tar.gz"
+          test -s "$bundle/image.tar.gz"
+          (cd out && zip -qr Wechatsync-Baize-MCP-Docker.zip wechatsync-mcp-docker)
+          unzip -tq out/Wechatsync-Baize-MCP-Docker.zip
+          unzip -Z1 out/Wechatsync-Baize-MCP-Docker.zip | grep -Fxq 'wechatsync-mcp-docker/compose.yaml'
+          unzip -Z1 out/Wechatsync-Baize-MCP-Docker.zip | grep -Fxq 'wechatsync-mcp-docker/image.tar.gz'
+      - name: Test Docker host Chrome WebSocket and Manager MCP network
+        run: |
+          set -euo pipefail
+          cd out/wechatsync-mcp-docker
+          cleanup() { bash uninstall.sh --purge || true; }
+          trap cleanup EXIT
+          bash install.sh
+          node smoke.mjs
+          docker run --rm --network baize-publishing --entrypoint node baize-wechatsync-mcp:baize-dev \
+            -e 'fetch("http://wechatsync-mcp:9528/health").then(async r=>{const data=await r.json();if(!r.ok||data.status!=="ok")process.exit(1)}).catch(e=>{console.error(e);process.exit(1)})'
+          original_hash="$(sha256sum .env | awk '{print $1}')"
+          bash install.sh
+          test "$original_hash" = "$(sha256sum .env | awk '{print $1}')"
+          bash manage.sh restart
+          bash manage.sh status
+          bash manage.sh logs --tail=15
+          bash uninstall.sh
+          test -f .env
+          test -z "$(docker ps -q --filter name='^/baize-wechatsync-mcp$')"
+          bash uninstall.sh --purge
+          test ! -e .env
+          trap - EXIT
+      - name: Checksums
+        run: |
+          cd out
+          sha256sum Wechatsync-Baize-Chrome-v2.zip Wechatsync-Baize-MCP-Server.zip Wechatsync-Baize-MCP-Linux.zip Wechatsync-Baize-MCP-Docker.zip > SHA256SUMS.txt
+      - name: Upload Chrome ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wechatsync-Baize-Chrome-v2
+          path: out/Wechatsync-Baize-Chrome-v2.zip
+          if-no-files-found: error
+      - name: Upload MCP server ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wechatsync-Baize-MCP-Server
+          path: out/Wechatsync-Baize-MCP-Server.zip
+          if-no-files-found: error
+      - name: Upload Linux systemd installer ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wechatsync-Baize-MCP-Linux
+          path: out/Wechatsync-Baize-MCP-Linux.zip
+          if-no-files-found: error
+      - name: Upload offline Docker Compose ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wechatsync-Baize-MCP-Docker
+          path: out/Wechatsync-Baize-MCP-Docker.zip
+          if-no-files-found: error
+      - name: Upload checksum manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: SHA256SUMS
+          path: out/SHA256SUMS.txt
+          if-no-files-found: error

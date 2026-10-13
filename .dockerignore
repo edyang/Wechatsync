@@ -1,0 +1,19 @@
+# Only build from source; never send credentials or local environments to Docker.
+.git
+.github
+.env
+.env.*
+**/.env
+**/.env.*
+**/node_modules
+**/dist
+out
+coverage
+.turbo
+**/*.log
+**/*.zip
+**/*.tar
+**/*.tar.gz
+**/.DS_Store
+.vscode
+.idea

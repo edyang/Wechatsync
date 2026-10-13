@@ -2,7 +2,7 @@
  * 掘金适配器
  */
 import { CodeAdapter, type ImageUploadResult } from '../code-adapter'
-import type { Article, AuthResult, SyncResult, PlatformMeta } from '../../types'
+import type { Article, AuthResult, SyncResult, PlatformMeta, PublishVerification } from '../../types'
 import type { PublishOptions } from '../types'
 import { signAWS4, crc32 } from '../../lib'
 import { createLogger } from '../../lib/logger'
@@ -12,6 +12,29 @@ const logger = createLogger('Juejin')
 // ImageX 服务常量
 const IMAGEX_AID = '2608'
 const IMAGEX_SERVICE_ID = '73owjymdk6'
+
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&amp;/gi, '&')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&#(\d+);/g, (_match, code) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([\da-f]+);/gi, (_match, code) => String.fromCodePoint(Number.parseInt(code, 16)))
+}
+
+function plainText(markdown: string): string {
+  return markdown
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/[#>*_`~\-|]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
 
 // 生成 UUID (用于 ImageX API)
 function generateUUID(): string {
@@ -99,7 +122,7 @@ export class JuejinAdapter extends CodeAdapter {
     name: '掘金',
     icon: 'https://lf-web-assets.juejin.cn/obj/juejin-web/xitu_juejin_web/static/favicons/favicon-32x32.png',
     homepage: 'https://juejin.cn',
-    capabilities: ['article', 'draft', 'image_upload', 'categories', 'tags', 'cover'],
+    capabilities: ['article', 'draft', 'image_upload', 'categories', 'tags', 'cover', 'direct_publish'],
   }
 
   /** 预处理配置: 掘金使用 Markdown 格式 */
@@ -222,7 +245,14 @@ export class JuejinAdapter extends CodeAdapter {
         }
       )
 
+      let coverImage = article.cover || ''
+      if (coverImage && !/(?:juejin\.cn|byteimg\.com)/i.test(coverImage)) {
+        const uploadedCover = await this.uploadImageByUrl(coverImage)
+        coverImage = uploadedCover.url
+      }
+
       // 6. 创建草稿 (参数来自 DSL juejin.yaml + juejin.transform.ts prepareBody)
+      const briefContent = (article.summary?.trim() || plainText(markdown)).slice(0, 100)
       const createResponse = await this.runtime.fetch(
         'https://api.juejin.cn/content_api/v1/article_draft/create',
         {
@@ -233,14 +263,14 @@ export class JuejinAdapter extends CodeAdapter {
             'x-secsdk-csrf-token': csrfToken,
           },
           body: JSON.stringify({
-            brief_content: '',
-            category_id: '0',
-            cover_image: '',
+            brief_content: briefContent,
+            category_id: article.category || '0',
+            cover_image: coverImage,
             edit_type: 10,
             html_content: 'deprecated',
             link_url: '',
             mark_content: markdown,
-            tag_ids: [],
+            tag_ids: article.tags || [],
             title: article.title,
           }),
         }
@@ -275,14 +305,187 @@ export class JuejinAdapter extends CodeAdapter {
 
       const draftUrl = `https://juejin.cn/editor/drafts/${draftId}`
 
+      if (options?.draftOnly === false) {
+        try {
+          return await this.publishDraft(draftId, csrfToken, article.title, {
+            userId: options.expectedUserId,
+            username: options.expectedUsername,
+          })
+        } catch (error) {
+          return this.createResult(false, {
+            postId: draftId,
+            postUrl: draftUrl,
+            draftOnly: true,
+            status: 'failed',
+            error: (error as Error).message,
+          })
+        }
+      }
+
       return this.createResult(true, {
         postId: draftId,
         postUrl: draftUrl,
-        draftOnly: options?.draftOnly ?? true,
+        draftOnly: true,
+        status: 'draft',
       })
     }).catch((error) => this.createResult(false, {
       error: (error as Error).message,
     }))
+  }
+
+  /** 将已完整保存的草稿提交给掘金发布流程。最终提交永不在适配器内重试。 */
+  private async publishDraft(
+    draftId: string,
+    csrfToken: string,
+    expectedTitle: string,
+    expectedAuthor: { userId?: string; username?: string } = {},
+  ): Promise<SyncResult> {
+    const response = await this.runtime.fetch(
+      'https://api.juejin.cn/content_api/v1/article/publish',
+      {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-secsdk-csrf-token': csrfToken,
+        },
+        body: JSON.stringify({
+          draft_id: draftId,
+          sync_to_org: false,
+          column_ids: [],
+          theme_ids: [],
+        }),
+      }
+    )
+    const responseText = await response.text()
+    logger.debug('Publish article response:', response.status, responseText.substring(0, 300))
+    if (!response.ok) {
+      throw new Error(`正式发布失败: ${response.status} - ${responseText.substring(0, 300)}`)
+    }
+
+    let data: {
+      err_no?: number
+      err_msg?: string
+      data?: { article_id?: string | number }
+    }
+    try {
+      data = JSON.parse(responseText)
+    } catch {
+      throw new Error(`正式发布失败: 响应不是有效 JSON - ${responseText.substring(0, 200)}`)
+    }
+    if (data.err_no !== 0) {
+      throw new Error(`正式发布失败: ${data.err_msg || `错误码 ${data.err_no ?? 'unknown'}`}`)
+    }
+
+    const articleId = data.data?.article_id === undefined
+      ? undefined
+      : String(data.data.article_id)
+    if (!articleId) throw new Error('正式发布失败: 平台未返回文章 ID')
+
+    const publicVerification = await this.verifyPublished(articleId, {
+      title: expectedTitle,
+      userId: expectedAuthor.userId,
+      username: expectedAuthor.username,
+    })
+    if (publicVerification.status === 'published') {
+      return this.createResult(true, {
+        postId: articleId,
+        postUrl: publicVerification.postUrl,
+        draftOnly: false,
+        status: 'published',
+        verification: publicVerification,
+        message: '文章已正式发布并通过公开页面验证',
+      })
+    }
+
+    const postUrl = `https://juejin.cn/post/${articleId}`
+    const verification: PublishVerification = {
+      verified: true,
+      status: 'submitted',
+      checkedAt: Date.now(),
+      method: 'publish_response',
+      postId: articleId,
+      postUrl,
+      expectedTitle,
+      visibility: 'unknown',
+      error: publicVerification.error,
+    }
+    return this.createResult(true, {
+      postId: articleId,
+      postUrl,
+      draftOnly: false,
+      status: 'submitted',
+      verification,
+      message: '掘金已接受发布请求，尚未通过公开页面确认，将进入只读复查',
+    })
+  }
+
+  /** 只读访问掘金公开文章页，不调用发布接口。 */
+  async verifyPublished(
+    postId: string,
+    expected: { title?: string; userId?: string; username?: string } = {},
+  ): Promise<PublishVerification> {
+    const postUrl = `https://juejin.cn/post/${postId}`
+    let lastError = '公开文章页暂不可用'
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const response = await this.runtime.fetch(postUrl, {
+          method: 'GET',
+          credentials: 'omit',
+          headers: { 'Accept': 'text/html' },
+        })
+        if (!response.ok) {
+          lastError = `公开文章验证失败: HTTP ${response.status}`
+        } else {
+          const html = await response.text()
+          const titleMatch = html.match(/<h1[^>]*class=["'][^"']*article-title[^"']*["'][^>]*>([\s\S]*?)<\/h1>/i)
+          const authorBlock = html.match(/<div[^>]*itemprop=["']author["'][^>]*>([\s\S]*?)<\/div>/i)?.[1] || html
+          const authorNameMatch = authorBlock.match(/<meta[^>]*itemprop=["']name["'][^>]*content=["']([^"']+)["'][^>]*>/i)
+          const authorUrlMatch = authorBlock.match(/<meta[^>]*itemprop=["']url["'][^>]*content=["'][^"']*\/user\/([^\/?"']+)[^"']*["'][^>]*>/i)
+          const actualTitle = titleMatch
+            ? decodeHtmlEntities(titleMatch[1].replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim())
+            : undefined
+          const authorName = authorNameMatch ? decodeHtmlEntities(authorNameMatch[1]).trim() : undefined
+          const authorId = authorUrlMatch?.[1]
+          const titleMatches = !expected.title || actualTitle === expected.title.trim()
+          const authorMatches = !expected.userId || authorId === expected.userId
+          const usernameMatches = !expected.username || authorName === expected.username
+          const verified = Boolean(actualTitle) && titleMatches && authorMatches && usernameMatches
+
+          return {
+            verified,
+            status: verified ? 'published' : 'unknown',
+            checkedAt: Date.now(),
+            method: 'public_url',
+            postId,
+            postUrl,
+            expectedTitle: expected.title,
+            actualTitle,
+            authorId,
+            authorName,
+            visibility: verified ? 'public' : 'unknown',
+            error: verified ? undefined : '公开文章信息与预期 ID、标题或作者不一致',
+          }
+        }
+      } catch (error) {
+        lastError = `公开文章验证失败: ${(error as Error).message}`
+      }
+
+      if (attempt < 2) await this.delay(300 * (attempt + 1))
+    }
+
+    return {
+      verified: false,
+      status: 'unknown',
+      checkedAt: Date.now(),
+      method: 'public_url',
+      postId,
+      postUrl,
+      expectedTitle: expected.title,
+      visibility: 'unknown',
+      error: lastError,
+    }
   }
 
   /**

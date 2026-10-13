@@ -1,0 +1,37 @@
+name: baize-wechatsync
+services:
+  wechatsync-mcp:
+    image: baize-wechatsync-mcp:baize-dev
+    container_name: baize-wechatsync-mcp
+    restart: unless-stopped
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      SYNC_WS_HOST: 0.0.0.0
+      SYNC_WS_PORT: "9527"
+      SYNC_HTTP_HOST: 0.0.0.0
+      SYNC_HTTP_PORT: "9528"
+      SYNC_BRIDGE_API_PORT: "9529"
+    # Host Chrome: ws://127.0.0.1:9527. Do not bind these ports to public IPs.
+    ports:
+      - "${WS_BIND_IP:-127.0.0.1}:${WS_HOST_PORT:-9527}:9527"
+      - "${MCP_BIND_IP:-127.0.0.1}:${MCP_HOST_PORT:-9528}:9528"
+    # Optional route to host services (NOT needed for Wechatsync extension).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - baize-publishing
+networks:
+  baize-publishing:
+    external: true
+    name: baize-publishing

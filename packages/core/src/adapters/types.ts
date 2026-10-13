@@ -1,4 +1,4 @@
-import type { Article, AuthResult, SyncResult, PlatformMeta } from '../types'
+import type { Article, AuthResult, SyncResult, PlatformMeta, PublishVerification } from '../types'
 import type { RuntimeInterface } from '../runtime/interface'
 
 /**
@@ -111,6 +111,9 @@ export interface PublishOptions {
   draftOnly?: boolean
   /** 图片上传进度回调 */
   onImageProgress?: ImageProgressCallback
+  /** 安全正式发布时用于发布后作者校验 */
+  expectedUserId?: string
+  expectedUsername?: string
 }
 
 /**
@@ -131,6 +134,12 @@ export interface PlatformAdapter {
 
   /** 发布文章 */
   publish(article: Article, options?: PublishOptions): Promise<SyncResult>
+
+  /** 独立验证正式发布结果；实现 direct_publish 的平台应提供 */
+  verifyPublished?(
+    postId: string,
+    expected?: { title?: string; userId?: string; username?: string },
+  ): Promise<PublishVerification>
 
   /** 上传图片 (如果支持) */
   uploadImage?(file: Blob, filename?: string): Promise<string>
