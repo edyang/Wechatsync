@@ -1,6 +1,8 @@
 # 文章同步助手 (Wechatsync)
 
-> **本 Fork 的平台覆盖说明**：下面的“29+ 平台”描述官方完整插件。公开源码通过私有子模块加载其中10个适配器，源码构建的白泽版不会包含它们。因此简书、什么值得买、搜狐焦点、头条等在该构建包中不会出现。需要这些平台时使用官方完整插件，并复用现有 MCP 服务；Manager v2.3.1 已补齐映射与适配器预检。详见 [平台覆盖与安装路径](docs/BAIZE_PLATFORM_COVERAGE.md)。
+> **白泽完整渠道修复包**：现提供以官网公开分发的完整版 ZIP 为底包的可复现补丁构建，保留全部29个适配器，修复B站图片转存、WebP兼容、官网题图提取及微博32字标题。使用方法见 [完整修复包安装说明](docs/BAIZE_COMPLETE_IMAGE_FIX.md)，运行 `node scripts/build-baize-complete.mjs` 构建。同步仍走草稿后人工发布。
+>
+> **普通源码构建的覆盖说明**：下面的“29+ 平台”描述官方完整插件。普通源码构建由于缺少上游私有子模块，仅含19个适配器；以上完整修复包使用官方公开完整版作为底包，不需要私有源码访问权限。详见 [平台覆盖与安装路径](docs/BAIZE_PLATFORM_COVERAGE.md)。
 
 ![](https://img.shields.io/github/v/release/wechatsync/Wechatsync.svg)
 ![](https://img.shields.io/github/last-commit/wechatsync/Wechatsync)

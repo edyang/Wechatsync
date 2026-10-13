@@ -6,6 +6,7 @@ import type { Article, AuthResult, SyncResult, PlatformMeta } from '../../types'
 import type { PublishOptions } from '../types'
 import { createLogger } from '../../lib/logger'
 import { parseMarkdownImages } from '../../lib/markdown-images'
+import { limitArticleTitle } from '../../lib/article-title'
 
 const logger = createLogger('Weibo')
 
@@ -116,6 +117,8 @@ export class WeiboAdapter extends CodeAdapter {
     return this.withHeaderRules(this.HEADER_RULES, async () => {
       logger.info('Starting publish...')
 
+      const title = limitArticleTitle(article.title)
+      if (!title) throw new Error('微博标题不能为空')
       const config = await this.getUserConfig()
       if (!config?.uid) {
         throw new Error('请先登录微博')
@@ -177,7 +180,7 @@ export class WeiboAdapter extends CodeAdapter {
           },
           body: new URLSearchParams({
             id: postId,
-            title: article.title,
+            title,
             subtitle: '',
             type: '',
             status: '0',

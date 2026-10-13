@@ -5,6 +5,7 @@ import { CodeAdapter, type ImageUploadResult } from '../code-adapter'
 import type { Article, AuthResult, SyncResult, PlatformMeta } from '../../types'
 import type { PublishOptions } from '../types'
 import { createLogger } from '../../lib/logger'
+import { BILIBILI_IMAGE_DOMAINS, normalizeBilibiliImageUrl, prepareBilibiliHtml, prepareBilibiliImage } from '../../lib/bilibili-images'
 
 const logger = createLogger('Bilibili')
 
@@ -28,6 +29,9 @@ export class BilibiliAdapter extends CodeAdapter {
   readonly preprocessConfig = {
     outputFormat: 'html' as const,
     removeLinks: true,
+    processLazyImages: true,
+    removeSrcset: true,
+    removeSizes: true,
   }
 
   private userInfo: BilibiliUserInfo | null = null
@@ -101,16 +105,20 @@ export class BilibiliAdapter extends CodeAdapter {
       }
 
       // Use pre-processed HTML content directly
-      let content = article.html || ''
+      let content = prepareBilibiliHtml(article.html || '', article.source?.url)
 
       content = await this.processImages(
         content,
         (src) => this.uploadImageByUrl(src),
         {
-          skipPatterns: ['hdslb.com', 'bilibili.com', 'biliimg.com'],
+          skipPatterns: BILIBILI_IMAGE_DOMAINS,
+          baseUrl: article.source?.url,
           onProgress: options?.onImageProgress,
         }
       )
+
+      // Every retained image must now be hosted by Bilibili, including URLs returned by its uploader.
+      content = content.replace(/<img\b[^>]*src="([^"]+)"[^>]*>/gi, (tag, src) => tag.replace(src, normalizeBilibiliImageUrl(src)))
 
       const res = await this.postForm<{
         code: number
@@ -139,7 +147,7 @@ export class BilibiliAdapter extends CodeAdapter {
       return this.createResult(true, {
         postId: String(res.data.aid),
         postUrl: draftUrl,
-        draftOnly: options?.draftOnly ?? true,
+        draftOnly: true,
       })
     }).catch((error) => this.createResult(false, {
       error: (error as Error).message,
@@ -151,14 +159,14 @@ export class BilibiliAdapter extends CodeAdapter {
       throw new Error('CSRF token 未获取')
     }
 
-    const imageResponse = await fetch(src)
+    const imageResponse = await fetch(src, { credentials: 'omit', signal: AbortSignal.timeout(30000) })
     if (!imageResponse.ok) {
       throw new Error('图片下载失败: ' + src)
     }
-    const imageBlob = await imageResponse.blob()
+    const image = await prepareBilibiliImage(await imageResponse.blob())
 
     const formData = new FormData()
-    formData.append('binary', imageBlob, 'image.jpg')
+    formData.append('binary', image.blob, image.filename)
     formData.append('csrf', this.csrf)
 
     const uploadUrl = 'https://api.bilibili.com/x/article/creative/article/upcover'
@@ -184,7 +192,7 @@ export class BilibiliAdapter extends CodeAdapter {
     }
 
     return {
-      url: res.data.url,
+      url: normalizeBilibiliImageUrl(res.data.url),
       attrs: {
         size: String(res.data.size),
       },

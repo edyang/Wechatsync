@@ -1,5 +1,7 @@
 # Wechatsync 平台覆盖与现有 MCP 服务兼容
 
+2026-10-13新增：[完整渠道图片修复包](BAIZE_COMPLETE_IMAGE_FIX.md)。该包保留官方公开完整ZIP的全部适配器，并以可审阅补丁修复B站图片、微博标题和白泽网页正文提取；它与普通公开源码构建的19适配器包不同。仍使用草稿后人工发布，不包含尚未验收的直发改造。
+
 ## 为什么 README 有平台、源码构建的插件没有
 
 官方完整浏览器插件与公开源码构建包具有不同的适配器集合。上游 v2 的 `.gitmodules` 将 `packages/core/src/adapters/platforms/private` 指向 `wechatsync/wechatsync-private-adapters` 私有仓库，公开源码的 `ADAPTER_CLASSES` 只明确注册19个适配器，其余通过 `import.meta.glob` 从私有目录加载。CI 没有私有仓库源码，因此不会打包这部分实现。更新 Cookie、登录账号或重建相同公开源码均不能补齐它们。
