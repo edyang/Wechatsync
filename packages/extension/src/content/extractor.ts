@@ -17,6 +17,7 @@ import { htmlToMarkdownNative, type PreprocessConfig } from '@wechatsync/core'
 import { createLogger } from '../lib/logger'
 import { preprocessContentDOM, preprocessForPlatform, backupAndSimplifyCodeBlocks, restoreCodeBlocks, type PreprocessResult } from '../lib/content-processor'
 import { createSyncFab } from '../lib/fab'
+import { extractBaizeArticle } from '../lib/baize-extractor'
 
 const logger = createLogger('Extractor')
 
@@ -36,6 +37,8 @@ interface ExtractedArticle {
  * 提取文章内容
  */
 async function extractArticle(): Promise<ExtractedArticle | null> {
+  const baize = extractBaizeArticle()
+  if (baize) return baize
   const url = window.location.href
 
   // 微信公众号

@@ -24,7 +24,7 @@ import type { Article, AuthResult, SyncResult, PlatformMeta, HeaderRule } from '
 import type { RuntimeInterface } from '../runtime/interface'
 import type { PlatformAdapter, PublishOptions } from './types'
 import { createLogger } from '../lib/logger'
-import { parseMarkdownImages } from '../lib/markdown-images'
+import { processArticleImages } from '../lib/article-images'
 
 const logger = createLogger('CodeAdapter')
 
@@ -44,6 +44,8 @@ export interface ImageUploadResult {
 export interface ImageProcessOptions {
   /** 跳过匹配这些模式的图片 */
   skipPatterns?: string[]
+  /** 原文章地址，用于解析相对图片路径 */
+  baseUrl?: string
   /** 进度回调 */
   onProgress?: (current: number, total: number) => void
 }
@@ -230,90 +232,7 @@ export abstract class CodeAdapter implements PlatformAdapter {
     uploadFn: (src: string) => Promise<ImageUploadResult>,
     options?: ImageProcessOptions
   ): Promise<string> {
-    const { skipPatterns = [], onProgress } = options || {}
-
-    // 提取所有图片（HTML + Markdown）
-    const matches: { full: string; src: string; alt?: string; type: 'html' | 'markdown' }[] = []
-
-    // 1. HTML 格式: <img ... src="url" ...>
-    const htmlImgRegex = /<img[^>]+src="([^"]+)"[^>]*>/gi
-    let match
-    while ((match = htmlImgRegex.exec(content)) !== null) {
-      matches.push({ full: match[0], src: match[1], type: 'html' })
-    }
-
-    // 2. Markdown 格式: ![alt](url)
-    for (const mdMatch of parseMarkdownImages(content)) {
-      matches.push({ full: mdMatch.full, src: mdMatch.src, alt: mdMatch.alt, type: 'markdown' })
-    }
-
-    if (matches.length === 0) {
-      return content
-    }
-
-    logger.debug(`Found ${matches.length} images to process (HTML + Markdown)`)
-
-    let result = content
-    const uploadedMap = new Map<string, ImageUploadResult>()
-    let processed = 0
-
-    for (const { full, src, alt, type } of matches) {
-      // 跳过空 src
-      if (!src) continue
-
-      // 跳过匹配的模式（但不跳过 data URI）
-      if (!src.startsWith('data:')) {
-        const shouldSkip = skipPatterns.some(pattern => src.includes(pattern))
-        if (shouldSkip) {
-          logger.debug(`Skipping matched pattern: ${src}`)
-          continue
-        }
-      }
-
-      processed++
-      onProgress?.(processed, matches.length)
-
-      try {
-        // 检查是否已上传过
-        let uploadResult = uploadedMap.get(src)
-
-        if (!uploadResult) {
-          logger.debug(`Uploading image ${processed}/${matches.length}: ${src.startsWith('data:') ? 'data URI' : src}`)
-          // uploadFn 应该能处理 URL 和 data URI（通过 fetch）
-          uploadResult = await uploadFn(src)
-          uploadedMap.set(src, uploadResult)
-        }
-
-        // 根据格式构建替换内容
-        let replacement: string
-        if (type === 'html') {
-          // HTML 格式
-          replacement = `<img src="${uploadResult.url}"`
-          if (uploadResult.attrs) {
-            for (const [key, value] of Object.entries(uploadResult.attrs)) {
-              replacement += ` ${key}="${value}"`
-            }
-          }
-          replacement += ' />'
-        } else {
-          // Markdown 格式
-          replacement = `![${alt || ''}](${uploadResult.url})`
-        }
-
-        // 替换原内容
-        result = result.replace(full, replacement)
-
-        logger.debug(`Image uploaded: ${uploadResult.url}`)
-      } catch (error) {
-        logger.error(`Failed to upload image: ${src}`, error)
-        // 继续处理其他图片
-      }
-
-      // 避免请求过快
-      await this.delay(300)
-    }
-
-    return result
+    return processArticleImages(content, uploadFn, options)
   }
 
   /**

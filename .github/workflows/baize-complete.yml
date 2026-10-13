@@ -1,0 +1,39 @@
+name: Baize complete channel image fix
+on:
+  push:
+    branches: [v2, 'fix/complete-channels-images-*']
+  pull_request:
+    branches: [v2]
+permissions:
+  contents: read
+jobs:
+  verify-and-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+      - name: Install pinned dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Image and content regression checks
+        run: |
+          node packages/core/node_modules/vitest/vitest.mjs run packages/core/src/lib/__tests__
+          node node_modules/typescript/bin/tsc --noEmit -p packages/core/tsconfig.json
+          node node_modules/typescript/bin/tsc --noEmit -p packages/extension/tsconfig.json
+      - name: Build all 29 adapters from the official complete distribution
+        run: node scripts/build-baize-complete.mjs
+      - name: Verify the delivered worker, image transfer and title guard without accounts
+        run: node scripts/verify-baize-complete.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Wechatsync-Baize-Complete-2.0.10.1
+          path: |
+            dist/Wechatsync-Baize-Complete-2.0.10.1.zip
+            dist/Wechatsync-Baize-Complete-2.0.10.1.zip.sha256
+          if-no-files-found: error
